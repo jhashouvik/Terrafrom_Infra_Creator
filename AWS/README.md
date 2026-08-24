@@ -102,13 +102,10 @@ validation.
 
 ## Running locally
 
-```bash
-cd AWS
-
-terraform init
-terraform plan      # terraform.tfvars is loaded automatically
-terraform apply
-```
+The backend is a partial configuration, so `terraform init` needs the state
+bucket passed in — see [Remote state](#remote-state) below for the exact
+commands. After that, `terraform plan` and `terraform apply` need no flags:
+`terraform.tfvars` is loaded automatically.
 
 ## Provider lock file
 
@@ -128,41 +125,47 @@ terraform init -upgrade                             # bump within the constraint
 > provider build for it, so Terraform cannot run locally on an ARM Windows
 > machine. Use WSL2 or the pipeline.
 
-## Bootstrapping remote state
+## Remote state
 
-The state bucket cannot be managed by the state it stores, so create it once,
-out of band. Native S3 locking (`use_lockfile = true`) means no DynamoDB table
-is needed.
+State lives at `s3://<state-bucket>/aws/terraform.tfstate`, where the bucket is
+named `<state_bucket_prefix>-<account-id>` (default prefix
+`shouvik-dev-tfstate`). Native S3 locking (`use_lockfile = true`) means no
+DynamoDB table is needed.
+
+**The pipeline creates this bucket for you.** The state bucket cannot be
+managed by the state it stores, so the *Ensure state bucket exists* step in
+[terraform-reusable.yml](../.github/workflows/terraform-reusable.yml) creates
+it out of band on first run — versioned, encrypted, and with public access
+blocked — then passes its name to `terraform init`. After the first run the
+step is a single `head-bucket` check.
+
+Change the prefix with the `state_bucket_prefix` input in the caller workflows.
+
+> The account id is resolved at runtime, which is why the `backend "s3"` block
+> in [versions.tf](versions.tf) is a **partial** configuration: `bucket` and
+> `region` are supplied via `-backend-config` rather than hard-coded.
+
+### Running locally
+
+Because the backend is partial, a local `terraform init` needs the bucket
+passed explicitly:
 
 ```bash
+cd AWS
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-REGION=ap-south-1
-BUCKET=acme-tfstate-${ACCOUNT}
 
-aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
-  --create-bucket-configuration LocationConstraint="$REGION"
+terraform init \
+  -backend-config="bucket=shouvik-dev-tfstate-${ACCOUNT}" \
+  -backend-config="region=ap-south-1"
 
-aws s3api put-bucket-versioning --bucket "$BUCKET" \
-  --versioning-configuration Status=Enabled
-
-aws s3api put-bucket-encryption --bucket "$BUCKET" \
-  --server-side-encryption-configuration \
-  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
-
-aws s3api put-public-access-block --bucket "$BUCKET" \
-  --public-access-block-configuration \
-  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+terraform plan
 ```
-
-Then update the `bucket` value in the `backend "s3"` block of
-[versions.tf](versions.tf).
 
 ## Placeholders to replace before first use
 
 | Where | Value |
 | --- | --- |
-| [versions.tf](versions.tf) | `backend.bucket` — your real state bucket name, and `region` |
-| [terraform.tfvars](terraform.tfvars) | `project`, `owner`, `cost_center`, `aws_region` |
+| [terraform.tfvars](terraform.tfvars) | `project`, `owner`, `cost_center`, `aws_region`, and each `bucket_name` |
 | GitHub Actions **Secrets** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
 
 ## Pipeline

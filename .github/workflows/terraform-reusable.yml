@@ -30,6 +30,14 @@ on:
         required: false
         type: string
         default: 1.13.1
+      state_bucket_prefix:
+        description: >-
+          Prefix for the Terraform state bucket. The AWS account id is appended
+          to it, giving a globally unique name. The bucket is created on first
+          run if it does not already exist.
+        required: false
+        type: string
+        default: shouvik-dev-tfstate
       aws_region:
         description: >-
           Region used only to authenticate and reach the STS and state-bucket
@@ -144,8 +152,40 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ inputs.aws_region }}
 
+      # The bucket that stores Terraform state cannot be managed by the state
+      # it stores, so it is created out of band here. Idempotent: after the
+      # first run this is a single head-bucket call.
+      - name: Ensure state bucket exists
+        id: state
+        run: |
+          set -euo pipefail
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="${{ inputs.state_bucket_prefix }}-${ACCOUNT}"
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "State bucket $BUCKET already exists."
+            exit 0
+          fi
+
+          echo "Creating state bucket $BUCKET ..."
+          if [ "${{ inputs.aws_region }}" = "us-east-1" ]; then
+            aws s3api create-bucket --bucket "$BUCKET" --region us-east-1
+          else
+            aws s3api create-bucket --bucket "$BUCKET" --region "${{ inputs.aws_region }}" --create-bucket-configuration LocationConstraint="${{ inputs.aws_region }}"
+          fi
+
+          # Versioning is what makes a corrupted or truncated state recoverable.
+          aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+
+          aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
+
+          # State contains resolved resource attributes - never public.
+          aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
       - name: terraform init
-        run: terraform init -input=false -lock-timeout=5m
+        run: |
+          terraform init -input=false -lock-timeout=5m -backend-config="bucket=${{ steps.state.outputs.bucket }}" -backend-config="region=${{ inputs.aws_region }}"
 
       # detailed-exitcode: 0 = no changes, 2 = changes present, 1 = error.
       # The apply job uses it to skip a pointless run.
@@ -259,6 +299,37 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ inputs.aws_region }}
 
+      # The bucket that stores Terraform state cannot be managed by the state
+      # it stores, so it is created out of band here. Idempotent: after the
+      # first run this is a single head-bucket call.
+      - name: Ensure state bucket exists
+        id: state
+        run: |
+          set -euo pipefail
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="${{ inputs.state_bucket_prefix }}-${ACCOUNT}"
+          echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "State bucket $BUCKET already exists."
+            exit 0
+          fi
+
+          echo "Creating state bucket $BUCKET ..."
+          if [ "${{ inputs.aws_region }}" = "us-east-1" ]; then
+            aws s3api create-bucket --bucket "$BUCKET" --region us-east-1
+          else
+            aws s3api create-bucket --bucket "$BUCKET" --region "${{ inputs.aws_region }}" --create-bucket-configuration LocationConstraint="${{ inputs.aws_region }}"
+          fi
+
+          # Versioning is what makes a corrupted or truncated state recoverable.
+          aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+
+          aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
+
+          # State contains resolved resource attributes - never public.
+          aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
       - name: Download plan artifact
         uses: actions/download-artifact@v4
         with:
@@ -266,7 +337,8 @@ jobs:
           path: ${{ inputs.working_directory }}
 
       - name: terraform init
-        run: terraform init -input=false -lock-timeout=5m
+        run: |
+          terraform init -input=false -lock-timeout=5m -backend-config="bucket=${{ steps.state.outputs.bucket }}" -backend-config="region=${{ inputs.aws_region }}"
 
       - name: terraform apply
         run: terraform apply -input=false -auto-approve -lock-timeout=5m tfplan.binary

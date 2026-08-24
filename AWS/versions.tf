@@ -1,9 +1,14 @@
 ###############################################################################
 # Root - Terraform and provider versions, remote state backend
 #
-# Single deployment: the backend is configured inline, so `terraform init`
-# needs no extra flags. Replace the bucket name below with the state bucket
-# created during bootstrap (see README.md -> "Bootstrapping remote state").
+# The backend is a PARTIAL configuration: bucket and region are supplied at
+# init time, because the state bucket name embeds the AWS account id and is
+# therefore not known until the pipeline authenticates.
+#
+#   terraform init -backend-config="bucket=<your-state-bucket>" -backend-config="region=ap-south-1"
+#
+# CI resolves and passes both automatically - see the "Ensure state bucket
+# exists" step in .github/workflows/terraform-reusable.yml.
 #
 # use_lockfile enables native S3 state locking, so no DynamoDB table is needed.
 ###############################################################################
@@ -19,9 +24,8 @@ terraform {
   }
 
   backend "s3" {
-    bucket       = "acme-tfstate-123456789012"
+    # bucket and region are injected via -backend-config at init time.
     key          = "aws/terraform.tfstate"
-    region       = "ap-south-1"
     encrypt      = true
     use_lockfile = true
   }
