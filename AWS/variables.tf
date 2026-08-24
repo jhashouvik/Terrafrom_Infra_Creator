@@ -69,7 +69,9 @@ variable "append_account_id_to_bucket_names" {
 variable "s3_buckets" {
   description = "Buckets to manage. Each entry is passed straight to the ./S3 module."
   type = map(object({
-    # Escape hatch for buckets that must keep a legacy name.
+    # Explicit physical bucket name. When set it is used verbatim: no project
+    # prefix and no account-ID suffix. When omitted the name is generated as
+    # "<project>-<map key>[-<account id>]" (see locals.tf).
     bucket_name   = optional(string)
     force_destroy = optional(bool, false)
     tags          = optional(map(string), {})
@@ -177,5 +179,15 @@ variable "s3_buckets" {
       : contains(keys(var.s3_buckets), cfg.logging.target_bucket_key)
     ])
     error_message = "logging.target_bucket_key must name another key in s3_buckets."
+  }
+
+  # S3 rejects uppercase in bucket names. Catching it here names the offending
+  # map key, instead of failing deep inside the module or at apply time.
+  validation {
+    condition = alltrue([
+      for key, cfg in var.s3_buckets :
+      cfg.bucket_name == null ? true : can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", cfg.bucket_name))
+    ])
+    error_message = "Every bucket_name must be 3-63 chars of lowercase letters, digits, hyphens or dots, starting and ending with a letter or digit. Uppercase is not allowed by S3."
   }
 }

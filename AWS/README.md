@@ -69,10 +69,28 @@ s3_buckets = {
 }
 ```
 
-The physical name is generated as `<project>-<key>-<account_id>` — e.g.
-`acme-user-uploads-123456789012`. Set `bucket_name` explicitly to override for a
-legacy bucket, and set `append_account_id_to_bucket_names = false` to drop the
-suffix.
+### Naming the bucket
+
+Two options per entry.
+
+**Set the name yourself** — `bucket_name` is used verbatim, with no prefix and
+no suffix:
+
+```hcl
+"app-artifacts" = {
+  bucket_name = "shouvik-dev-v7"
+  ...
+}
+```
+
+**Or let it be generated** — omit `bucket_name` and the physical name becomes
+`<project>-<key>-<account_id>`, e.g. `shouvik-dev-user-uploads-123456789012`.
+Set `append_account_id_to_bucket_names = false` to drop the account suffix.
+
+S3 names are **globally unique across every AWS account** and must be 3-63
+characters of lowercase letters, digits, hyphens or dots — uppercase is
+rejected, so `shouvik-dev-V7` is not a legal name. A root validation catches
+this at plan time and tells you which map key is at fault.
 
 `logging` takes **either** `target_bucket_key` (another key in the map — the
 generated name is resolved for you, so nothing is hard-coded) **or**
@@ -145,7 +163,7 @@ Then update the `bucket` value in the `backend "s3"` block of
 | --- | --- |
 | [versions.tf](versions.tf) | `backend.bucket` — your real state bucket name, and `region` |
 | [terraform.tfvars](terraform.tfvars) | `project`, `owner`, `cost_center`, `aws_region` |
-| GitHub repository variables | `AWS_ROLE_ARN`, `AWS_REGION` |
+| GitHub Actions **Secrets** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
 
 ## Pipeline
 

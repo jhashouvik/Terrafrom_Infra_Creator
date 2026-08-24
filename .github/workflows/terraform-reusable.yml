@@ -2,13 +2,17 @@
 # Reusable Terraform pipeline
 #
 # One place that knows HOW to run Terraform. The caller workflows decide WHEN.
-# Authentication is GitHub OIDC -> AWS IAM role; no long-lived access keys
-# exist anywhere in this repo.
 #
-# Repository variables consumed:
-#   AWS_REGION           region to authenticate against
-#   AWS_ROLE_ARN         role used by apply / destroy
-#   AWS_PLAN_ROLE_ARN    read-only role used by plan (falls back to AWS_ROLE_ARN)
+# Authentication uses static IAM access keys held in GitHub Actions SECRETS.
+# They are long-lived: rotate them periodically, and prefer migrating to
+# GitHub OIDC (role-to-assume) when practical - see workflows/README.md.
+#
+# Repository SECRETS consumed (encrypted, masked in logs):
+#   AWS_ACCESS_KEY_ID          IAM access key id
+#   AWS_SECRET_ACCESS_KEY      IAM secret access key
+#
+# No repository variables are needed. The region is an input with a default,
+# because the real region lives in AWS/terraform.tfvars.
 ###############################################################################
 
 name: terraform-reusable
@@ -26,6 +30,15 @@ on:
         required: false
         type: string
         default: 1.13.1
+      aws_region:
+        description: >-
+          Region used only to authenticate and reach the STS and state-bucket
+          endpoints. It does NOT decide where resources are created - that is
+          var.aws_region in AWS/terraform.tfvars, which providers.tf reads.
+          Keep the two in sync unless you deliberately want them to differ.
+        required: false
+        type: string
+        default: ap-south-1
       apply:
         description: Apply the generated plan after it is produced.
         required: false
@@ -101,7 +114,7 @@ jobs:
           exit-code: "1"
 
   #-----------------------------------------------------------------------------
-  # Plan. Runs with a read-only role and publishes the plan as an artifact so
+  # Plan. Publishes the plan as an artifact so
   # the apply job executes exactly what was reviewed.
   #-----------------------------------------------------------------------------
   plan:
@@ -110,7 +123,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
       pull-requests: write
     outputs:
       exitcode: ${{ steps.plan.outputs.exitcode }}
@@ -125,12 +137,12 @@ jobs:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN || vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-          role-session-name: gha-plan-${{ github.run_id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
 
       - name: terraform init
         run: terraform init -input=false -lock-timeout=5m
@@ -229,7 +241,6 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-      id-token: write
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -241,12 +252,12 @@ jobs:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-          role-session-name: gha-apply-${{ github.run_id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
 
       - name: Download plan artifact
         uses: actions/download-artifact@v4
