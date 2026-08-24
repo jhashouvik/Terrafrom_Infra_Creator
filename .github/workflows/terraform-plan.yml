@@ -1,0 +1,33 @@
+###############################################################################
+# Pull request gate
+#
+# Every PR that touches the AWS root module or any resource folder gets a
+# validated, security-scanned plan posted back as a single self-updating
+# comment. Nothing is applied here.
+###############################################################################
+
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "AWS/**"
+      - ".github/workflows/terraform-*.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      comment_on_pr: true
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write

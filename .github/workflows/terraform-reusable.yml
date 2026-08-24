@@ -1,0 +1,271 @@
+###############################################################################
+# Reusable Terraform pipeline
+#
+# One place that knows HOW to run Terraform. The caller workflows decide WHEN.
+# Authentication is GitHub OIDC -> AWS IAM role; no long-lived access keys
+# exist anywhere in this repo.
+#
+# Repository variables consumed:
+#   AWS_REGION           region to authenticate against
+#   AWS_ROLE_ARN         role used by apply / destroy
+#   AWS_PLAN_ROLE_ARN    read-only role used by plan (falls back to AWS_ROLE_ARN)
+###############################################################################
+
+name: terraform-reusable
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: Root module directory.
+        required: false
+        type: string
+        default: AWS
+      terraform_version:
+        description: Terraform version to pin.
+        required: false
+        type: string
+        default: 1.13.1
+      apply:
+        description: Apply the generated plan after it is produced.
+        required: false
+        type: boolean
+        default: false
+      destroy:
+        description: Produce (and, with apply, run) a destroy plan.
+        required: false
+        type: boolean
+        default: false
+      comment_on_pr:
+        description: Post the plan summary back to the pull request.
+        required: false
+        type: boolean
+        default: false
+      approval_environment:
+        description: GitHub Environment that gates the apply job. Add required reviewers to it to get a manual approval step.
+        required: false
+        type: string
+        default: aws
+
+permissions:
+  contents: read
+
+jobs:
+  #-----------------------------------------------------------------------------
+  # Static quality gates. Cheap, no AWS access, fail fast.
+  #-----------------------------------------------------------------------------
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      # No backend access needed just to type-check the configuration.
+      - name: terraform init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform validate -no-color
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive --format compact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Pinned explicitly so --recursive uses one ruleset for the root
+          # module and every resource folder underneath it.
+          TFLINT_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.working_directory }}/.tflint.hcl
+
+      - name: Trivy IaC scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.working_directory }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  #-----------------------------------------------------------------------------
+  # Plan. Runs with a read-only role and publishes the plan as an artifact so
+  # the apply job executes exactly what was reviewed.
+  #-----------------------------------------------------------------------------
+  plan:
+    name: plan
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN || vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}
+
+      - name: terraform init
+        run: terraform init -input=false -lock-timeout=5m
+
+      # detailed-exitcode: 0 = no changes, 2 = changes present, 1 = error.
+      # The apply job uses it to skip a pointless run.
+      # terraform.tfvars is loaded automatically, so no -var-file is needed.
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock-timeout=5m \
+            ${{ inputs.destroy && '-destroy' || '' }} \
+            -detailed-exitcode -out=tfplan.binary
+          code=$?
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 1 ]; then exit 1; fi
+          terraform show -no-color tfplan.binary > tfplan.txt
+          terraform show -json tfplan.binary > tfplan.json
+
+      - name: Plan summary
+        run: |
+          {
+            echo "### Terraform plan${{ inputs.destroy && ' (DESTROY)' || '' }}"
+            echo
+            echo '```terraform'
+            head -c 60000 tfplan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}
+          path: |
+            ${{ inputs.working_directory }}/tfplan.binary
+            ${{ inputs.working_directory }}/tfplan.txt
+            ${{ inputs.working_directory }}/tfplan.json
+          retention-days: 5
+          if-no-files-found: error
+
+      - name: Comment plan on pull request
+        if: inputs.comment_on_pr && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          WORKDIR: ${{ inputs.working_directory }}
+          EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- terraform-plan -->';
+            const raw = fs.readFileSync(`${process.env.WORKDIR}/tfplan.txt`, 'utf8');
+            const max = 55000;
+            const plan = raw.length > max
+              ? raw.slice(0, max) + '\n\n... truncated, see the workflow run for the full plan.'
+              : raw;
+            const changed = process.env.EXITCODE === '2';
+            const body = [
+              marker,
+              '### Terraform plan',
+              changed ? '**Changes detected.**' : '**No changes.** Infrastructure matches configuration.',
+              '',
+              '<details><summary>Show plan</summary>',
+              '',
+              '```terraform',
+              plan,
+              '```',
+              '</details>',
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  #-----------------------------------------------------------------------------
+  # Apply. Gated by a GitHub Environment, and applies the saved plan file so
+  # nothing can drift between review and execution.
+  #-----------------------------------------------------------------------------
+  apply:
+    name: apply
+    needs: plan
+    if: inputs.apply && needs.plan.outputs.exitcode == '2'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.approval_environment }}
+    concurrency:
+      group: terraform-apply
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-apply-${{ github.run_id }}
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}
+          path: ${{ inputs.working_directory }}
+
+      - name: terraform init
+        run: terraform init -input=false -lock-timeout=5m
+
+      - name: terraform apply
+        run: terraform apply -input=false -auto-approve -lock-timeout=5m tfplan.binary
+
+      - name: Outputs
+        run: |
+          {
+            echo "### Applied"
+            echo
+            echo '```json'
+            terraform output -json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

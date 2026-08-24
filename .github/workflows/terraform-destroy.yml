@@ -1,0 +1,46 @@
+###############################################################################
+# Manual teardown
+#
+# Deliberately awkward: manual dispatch only, the word DESTROY must be typed as
+# confirmation, and the apply still waits on the `aws` GitHub Environment.
+###############################################################################
+
+name: Terraform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type DESTROY to confirm.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-destroy
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: confirm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "DESTROY" ]; then
+            echo "::error::Confirmation did not match. Type DESTROY exactly."
+            exit 1
+          fi
+
+  destroy:
+    needs: guard
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      destroy: true
+      apply: true
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write

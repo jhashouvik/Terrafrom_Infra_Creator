@@ -1,0 +1,37 @@
+###############################################################################
+# Deploy
+#
+# On merge to main the merged commit is planned again and applied. The apply
+# job waits on the `aws` GitHub Environment, so adding required reviewers there
+# turns this into an approval-gated deploy without touching this file.
+#
+# workflow_dispatch is available for re-running a deploy, e.g. after fixing
+# state drift.
+###############################################################################
+
+name: Terraform Apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "AWS/**"
+      - ".github/workflows/terraform-*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-apply-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/terraform-reusable.yml
+    with:
+      apply: true
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write

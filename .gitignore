@@ -1,0 +1,28 @@
+# Terraform
+**/.terraform/*
+.terraform.lock.hcl.bak
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Plan files must never be committed - they can contain resolved secrets.
+*.tfplan
+tfplan
+tfplan.*
+
+# Never commit real variable values outside environments/*.tfvars
+*.auto.tfvars
+secrets.tfvars
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
