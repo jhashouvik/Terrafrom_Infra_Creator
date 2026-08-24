@@ -106,7 +106,7 @@ jobs:
           TFLINT_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.working_directory }}/.tflint.hcl
 
       - name: Trivy IaC scan
-        uses: aquasecurity/trivy-action@v0.71.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: ${{ inputs.working_directory }}
