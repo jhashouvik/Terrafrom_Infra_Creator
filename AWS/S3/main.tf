@@ -296,7 +296,12 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
       filter {
         # A tag filter must be expressed through an `and` block; a bare
         # prefix can stay on the filter itself.
-        prefix = rule.value.tags == null ? coalesce(rule.value.prefix, "") : null
+        #
+        # coalesce() rejects "" as well as null, so it cannot supply the
+        # fallback here: a rule that omits prefix would leave coalesce with no
+        # valid argument at all. "" is the correct value - it selects every
+        # object in the bucket.
+        prefix = rule.value.tags == null ? (rule.value.prefix == null ? "" : rule.value.prefix) : null
 
         dynamic "and" {
           for_each = rule.value.tags != null ? [1] : []
@@ -489,7 +494,9 @@ resource "aws_s3_bucket_replication_configuration" "this" {
     status = "Enabled"
 
     filter {
-      prefix = coalesce(var.replication.prefix, "")
+      # Same reason as the lifecycle filter above: coalesce() treats "" as an
+      # absent value, so the fallback has to be explicit.
+      prefix = var.replication.prefix == null ? "" : var.replication.prefix
     }
 
     delete_marker_replication {
