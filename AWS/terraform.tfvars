@@ -29,7 +29,9 @@ s3_buckets = {
     sse_algorithm      = "AES256"
     create_kms_key     = false
     versioning_enabled = true
-    force_destroy      = false
+    # true so `terraform destroy` can empty the bucket first. S3 refuses to
+    # delete a bucket that still holds objects or object versions.
+    force_destroy = true
 
     # Resolved to the name of the "access-logs" bucket below, whether that
     # name is explicit or generated.
@@ -70,7 +72,7 @@ s3_buckets = {
 
     sse_algorithm  = "AES256"
     create_kms_key = false
-    force_destroy  = false
+    force_destroy  = true
 
     lifecycle_rules = [
       {
